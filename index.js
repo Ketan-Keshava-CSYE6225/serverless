@@ -16,6 +16,7 @@ const postgresDBName = process.env.DATABASE_NAME || "webapp";
 const postgresDBUser = process.env.DATABASE_USER || "webapp";
 const postgresDBPassword = process.env.DATABASE_PASSWORD || "password";
 const postgresDBHost = process.env.DATABASE_HOST || "localhost";
+const mailVerificationExpiryTime = parseInt(process.env.VERIFICATION_LINK_TIME_WINDOW) || 120000; // default: 2 minutes
 
 // Clients
 const mailgunClient = mailgun({ apiKey: mailgunApiKey, domain: mailgunDomain });
@@ -34,60 +35,74 @@ export const User = postgresDBConnection.define(
   "User",
   {
     id: {
-        type: DataTypes.UUID,
-        defaultValue: DataTypes.UUIDV4,
-        primaryKey: true,
-        allowNull: false,
+      type: DataTypes.UUID,
+      defaultValue: Sequelize.UUIDV4,
+      primaryKey: true,
+      allowNull: false,
+      noUpdate: true //Adds no update/readonly attributes support to models
     },
     first_name: {
-        type: DataTypes.STRING,
-        allowNull: false
+      type: DataTypes.STRING,
+      allowNull: false
     },
     last_name: {
-        type: DataTypes.STRING,
-        allowNull: false
+      type: DataTypes.STRING,
+      allowNull: false
     },
     password: {
-        type: DataTypes.STRING,
-        allowNull: false,
+      type: DataTypes.STRING,
+      allowNull: false,
+      set(value) {
+        // You can hash the password here before saving it to the database
+        // Example: this.setDataValue('password', hashFunction(value));
+        this.setDataValue('password', value);
+      }
     },
     username: {
-        type: DataTypes.STRING,
-        allowNull: false,
-        unique: true,
+      type: DataTypes.STRING,
+      allowNull: false,
+      unique: true,
+      validate: {
+        isEmail: true
+      }
     },
     account_created: {
-        type: DataTypes.DATE,
-        allowNull: false,
-        defaultValue: DataTypes.NOW,
+      type: DataTypes.DATE,
+      defaultValue: Sequelize.NOW,
+      allowNull: false,
+      noUpdate: true //Adds no update/readonly attributes support to models
     },
     account_updated: {
-        type: DataTypes.DATE,
-        allowNull: false,
-        defaultValue: DataTypes.NOW,
+      type: DataTypes.DATE,
+      defaultValue: Sequelize.NOW,
+      allowNull: false
     },
-    verification_email_sent_timestamp: {
-        type: DataTypes.DATE,
-        allowNull: true,
-        defaultValue: Sequelize.literal('CURRENT_TIMESTAMP'),
+    verification_token: {
+      type: DataTypes.UUID,
+      allowNull: false,
+      defaultValue: Sequelize.UUIDV4
     },
-    user_verification_status : {
-        type: DataTypes.BOOLEAN,
-        allowNull: false,
-        defaultValue: false,
+    verification_link_expiry_timestamp: {
+      type: DataTypes.DATE,
+      allowNull: false,
+      defaultValue: Sequelize.literal('CURRENT_TIMESTAMP')
+    },
+    user_verification_status: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false
     }
-  }, 
-  {
-    tableName: 'users',
-    timestamps: false,
+  }, {
+    // timestamps: false, // Disable sequelize's default timestamps (createdAt, updatedAt)
+    tableName: 'users', // Define the table name explicitly
+    createdAt: 'account_created',
+    updatedAt: 'account_updated',
     indexes: [
-        {
-            unique: true,
-            fields: ['username']
-        }
-    ],
-    updatedAt: 'account_updated', // Map updatedAt to account_updated
-    createdAt: 'account_created', // Map createdAt to account_created
+      {
+        unique: true,
+        fields: ['username']
+      }
+    ]
   }
 );
 
@@ -96,7 +111,7 @@ cloudEvent("sendVerifyEmail", async (payload) => {
 
   const message = JSON.parse(Buffer.from(payloadMessage, "base64").toString());
 
-  const token = message.id;
+  const token = message.token;
   const email = message.email;
 
   await sendVerificationEmail(email, token);
@@ -126,15 +141,19 @@ export const sendVerificationEmail = async (email, token) => {
 };
 
 export const updateVerificationEmailSentTimestamp = async (token) => {
-  const currentTimestamp = new Date();
+  const currentTimestamp = new Date().getTime();
   try {
     const user = await User.findOne({
       where: {
-        id: token,
+        verification_token: token,
       },
     });
-    user.verification_email_sent_timestamp = currentTimestamp;
+    user.verification_link_expiry_timestamp = new Date(currentTimestamp + mailVerificationExpiryTime);
     await user.save();
+
+    console.info(
+      `[Cloud Function: Send Verification Email] ${user.id} expiry timestamp: ${new Date(currentTimestamp + mailVerificationExpiryTime)}`
+    );
 
     console.info(
       `[Cloud Function: Send Verification Email] ${user.id} verification email sent at ${currentTimestamp}`
